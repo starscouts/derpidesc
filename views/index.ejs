@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport"
+          content="width=device-width, user-scalable=no, initial-scale=1.0, maximum-scale=1.0, minimum-scale=1.0">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Derpisearch</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="/assets/localforage.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <br><br>
+
+        <h1 style="text-align: center; margin-bottom: 20px;">Derpisearch</h1>
+        <input style="margin-bottom: 20px;" id="query" onblur="lastPress = new Date().getTime() - 5000; needUpdate = true;" onkeydown="lastPress = new Date().getTime(); needUpdate = true;" onkeyup="lastPress = new Date().getTime(); needUpdate = true;" class="form-control" placeholder="Search for images on Derpibooru, use natural language or tags">
+
+        <div id="results" style="display: none;">
+            <div class="small text-muted" id="stats" style="margin-bottom: 10px;"></div>
+
+            <div style="display: grid; grid-template-columns: max-content 1fr max-content;">
+                <div class="btn-group">
+                    <input onchange="updateDisplay();" type="checkbox" class="btn-check" id="rating-safe" checked autocomplete="off">
+                    <label class="btn btn-outline-primary" for="rating-safe">Safe</label>
+
+                    <input onchange="updateDisplay();" type="checkbox" class="btn-check" id="rating-questionable" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="rating-questionable">Questionable</label>
+
+                    <input onchange="updateDisplay();" type="checkbox" class="btn-check" id="rating-suggestive" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="rating-suggestive">Suggestive</label>
+
+                    <input onchange="updateDisplay();" type="checkbox" class="btn-check" id="rating-explicit" autocomplete="off">
+                    <label class="btn btn-outline-primary" for="rating-explicit">Explicit</label>
+                </div>
+                <div></div>
+                <div>
+                    <select id="sorting" onchange="updateDisplay();" class="form-select">
+                        <option selected value="relevance">Relevant</option>
+                        <option value="new">New</option>
+                        <option value="popular">Popular</option>
+                        <option value="resolution">Resolution</option>
+                        <option value="model" disabled id="sorting-model">For you</option>
+                    </select>
+                </div>
+            </div>
+
+            <div id="images" style="display: grid; grid-template-columns: repeat(6, 1fr); grid-gap: 10px; margin-top: 20px;"></div>
+        </div>
+
+        <div id="load" style="display: none;">
+            Searching...
+        </div>
+    </div>
+
+    <script>
+        let lastPress = 0;
+        let needUpdate = false;
+        let lastQuery = "";
+
+        setInterval(() => {
+            if (new Date().getTime() - lastPress > 3000 && needUpdate && lastQuery.trim().toLowerCase() !== document.getElementById('query').value.trim().toLowerCase()) {
+                needUpdate = false;
+                lastQuery = document.getElementById('query').value;
+
+                if (document.getElementById('query').value.trim() === "") {
+                    document.getElementById("results").style.display = "none";
+                    document.getElementById("load").style.display = "none";
+                } else {
+                    document.getElementById("load").style.display = "";
+                    document.getElementById("results").style.display = "none";
+
+                    let start = new Date().getTime();
+
+                    fetch("/api?q=" + encodeURIComponent(document.getElementById('query').value.trim().toLowerCase())).then((res) => {
+                        res.json().then((data) => {
+                            document.getElementById("stats").innerText = data.results.length + " results in " + ((new Date().getTime() - start) / 1000).toFixed(2) + " seconds";
+                            document.getElementById("load").style.display = "none";
+                            document.getElementById("results").style.display = "";
+
+                            window.searchResults = data;
+                            updateDisplay();
+                        });
+                    });
+                }
+            }
+        }, 500);
+
+        async function startTraining() {
+            window.apiKey = localStorage.getItem("derpibooru-api-key") ?? prompt("Enter your Derpibooru API key:");
+            localStorage.setItem("derpibooru-api-key", window.apiKey);
+            let modal = new bootstrap.Modal(document.getElementById("ai-updating"));
+
+            modal.show();
+            await trainModel();
+            modal.hide();
+        }
+
+        async function updateDisplay() {
+            if (await localforage.getItem("ai-model") === null) {
+                document.getElementById("sorting-model").disabled = true;
+            } else {
+                document.getElementById("sorting-model").disabled = false;
+            }
+
+            let ratings = [];
+
+            if (document.getElementById("rating-safe").checked) ratings.push("safe");
+            if (document.getElementById("rating-questionable").checked) ratings.push("questionable");
+            if (document.getElementById("rating-suggestive").checked) ratings.push("suggestive");
+            if (document.getElementById("rating-explicit").checked) ratings.push("explicit");
+
+            let order = document.getElementById("sorting").value;
+
+            let dataset = window.searchResults.results.filter(i => i.mime_type.startsWith("image/")).filter((i) => {
+                if (ratings.includes("safe") && i.tags.includes("safe")) return true;
+                if (ratings.includes("questionable") && i.tags.includes("questionable")) return true;
+                if (ratings.includes("suggestive") && i.tags.includes("suggestive")) return true;
+                if (ratings.includes("explicit") && i.tags.includes("explicit")) return true;
+                return false;
+            }).slice(0, 50);
+
+            if (order === "new") {
+                dataset = dataset.sort((a, b) => {
+                    return new Date(b['created_at']) - new Date(a['created_at']);
+                });
+            } else if (order === "popular") {
+                dataset = dataset.sort((a, b) => {
+                    return b['score'] - a['score'];
+                });
+            } else if (order === "resolution") {
+                dataset = dataset.sort((a, b) => {
+                    return (b['width'] * b['height']) - (a['width'] * a['height']);
+                });
+            }
+
+            document.getElementById("images").innerHTML = dataset.map(i =>
+                `<a target="_blank" style="background-color: #eee; aspect-ratio: 1; border-radius: 5px; cursor: pointer; display: block; background-position: center; background-size: cover; background-image: url('${i.representations.thumb ?? i.representations.small ?? i.representations.medium ?? i.representations.large ?? i.representations.full ?? i.view_url}');" title="${i._natural}" href="https://derpibooru.org/images/${i.id}"></a>`
+            ).join("");
+        }
+
+        function timeToString(time) {
+            if (!isNaN(parseInt(time))) {
+                time = new Date(time).getTime();
+            }
+
+            let periods = ["second", "minute", "hour", "day", "week", "month", "year", "age"];
+
+            let lengths = ["60", "60", "24", "7", "4.35", "12", "100"];
+
+            let now = new Date().getTime();
+
+            let difference = time / 1000;
+            let period;
+
+            let j;
+
+            for (j = 0; difference >= lengths[j] && j < lengths.length - 1; j++) {
+                difference /= lengths[j];
+            }
+
+            difference = Math.round(difference);
+
+            period = periods[j];
+
+            return `${difference} ${period}${difference > 1 ? "s" : ""}`;
+        }
+
+        function getAIScore(image) {
+            let tags = {};
+
+            for (let entry of window.model) {
+                for (let tag of entry['tags']) {
+                    if (!tags[tag]) tags[tag] = {
+                        id: tag,
+                        score: 0,
+                        entries: 0,
+                        final: null
+                    }
+
+                    tags[tag]['entries']++;
+                    tags[tag]['score'] += entry['liked'] ? 1 : -1;
+                }
+            }
+
+            for (let id of Object.keys(tags)) {
+                tags[id]['final'] = tags[id]['score'] / tags[id]['entries'];
+            }
+
+            let resolved = image['tag_ids'].filter(i => tags[i]).map(i => (tags[i]['final'] + 1) / 2);
+
+            return (resolved.length > 0 ? resolved.reduce((a, b) => a + b) / resolved.length : 0);
+        }
+
+        function sleep(ms) {
+            return new Promise((res) => {
+                setTimeout(res, ms);
+            })
+        }
+
+        async function trainModel() {
+            let count1;
+            let count2;
+
+            count1 = (await (await fetch("/api/v1/json/search?q=" + encodeURIComponent("my:upvotes") + "&per_page=1&page=1&filter_id=56027&key=" + encodeURIComponent(window.apiKey))).json())['total'];
+            count2 = (await (await fetch("/api/v1/json/search?q=" + encodeURIComponent("my:downvotes") + "&per_page=1&page=1&filter_id=56027&key=" + encodeURIComponent(window.apiKey))).json())['total'];
+
+            let pages1 = Math.ceil(count1 / 50);
+            let pages2 = Math.ceil(count2 / 50);
+            let pageTotal = 0;
+            let pageTimes = [];
+
+            window.model = [];
+
+            for (let page = 1; page <= pages1; page++) {
+                pageTotal++;
+                let start = new Date();
+
+                await sleep(1000);
+                let data;
+
+                data = (await (await fetch("/api/v1/json/search?q=" + encodeURIComponent("my:upvotes") + "&per_page=50&page=" + page + "&filter_id=56027&key=" + encodeURIComponent(window.apiKey))).json());
+                console.log(pageTotal, pages1 + pages2);
+
+                for (let item of data['images']) {
+                    window.model.push({
+                        liked: true,
+                        id: item['id'],
+                        characters: null,
+                        metadata: {
+                            animated: item['animated'],
+                            duration: item['duration'],
+                            height: item['height'],
+                            width: item['width'],
+                            aspect_ratio: item['aspect_ratio']
+                        },
+                        tags: item['tag_ids'],
+                        _tagNames: item['tags'],
+                        _url: item['representations']['medium']
+                    });
+                }
+
+                pageTimes.push(new Date().getTime() - start);
+                let percent = (pageTotal / (pages1 + pages2)) * 100;
+
+                document.getElementById("ai-updating-progress").innerText = Math.round(percent) + "%";
+                document.getElementById("ai-updating-bar").style.width = percent + "%";
+
+                if (pageTotal > 10) {
+                    document.getElementById("ai-updating-eta").innerText = timeToString(((pages1 + pages2) - pageTotal) * (pageTimes.reduce((a, b) => a + b) / pageTimes.length));
+                }
+            }
+
+            for (let page = 1; page <= pages2; page++) {
+                pageTotal++;
+                let start = new Date();
+
+                await sleep(1000);
+                let data;
+
+                data = (await (await fetch("/api/v1/json/search?q=" + encodeURIComponent("my:downvotes") + "&per_page=50&page=" + page + "&filter_id=56027&key=" + encodeURIComponent(window.apiKey))).json());
+                console.log(pageTotal, pages1 + pages2);
+
+                for (let item of data['images']) {
+                    window.model.push({
+                        liked: false,
+                        id: item['id'],
+                        characters: null,
+                        metadata: {
+                            animated: item['animated'],
+                            duration: item['duration'],
+                            height: item['height'],
+                            width: item['width'],
+                            aspect_ratio: item['aspect_ratio']
+                        },
+                        tags: item['tag_ids'],
+                        _tagNames: item['tags'],
+                        _url: item['representations']['medium']
+                    });
+                }
+
+                pageTimes.push(new Date().getTime() - start);
+                let percent = (pageTotal / (pages1 + pages2)) * 100;
+
+                document.getElementById("ai-updating-progress").innerText = Math.round(percent) + "%";
+                document.getElementById("ai-updating-bar").style.width = percent + "%";
+
+                if (pageTotal > 10) {
+                    document.getElementById("ai-updating-eta").innerText = timeToString(((pages1 + pages2) - pageTotal) * (pageTimes.reduce((a, b) => a + b) / pageTimes.length));
+                }
+            }
+
+            localforage.setItem("ai-model", window.model);
+        }
+    </script>
+
+    <div class="modal fade" id="ai-updating" data-bs-backdrop="static" data-bs-keyboard="false" tabindex="-1">
+        <div class="modal-dialog">
+            <div class="modal-content">
+                <div class="modal-body">
+                    Updating Derpisearch AI model, please wait...
+                    <div class="progress" style="margin-top: 10px; margin-bottom: 10px;">
+                        <div class="progress-bar progress-bar-striped progress-bar-animated" id="ai-updating-bar" style="width: 0;"></div>
+                    </div>
+                    <span id="ai-updating-eta">Calculating time</span> left<span id="ai-updating-progress" style="float: right;">0%</span>
+                </div>
+            </div>
+        </div>
+    </div>
+</body>
+</html>
